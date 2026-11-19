@@ -1,0 +1,39 @@
+[project]
+name = "risk-rule-mining"
+version = "0.1.0"
+description = "MCP server that mines interpretable risk rules from relational financial data"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Mohamad Reza Moosavi" }]
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=2.0",
+    "duckdb>=1.1",
+    "kaggle>=1.6",
+    "six>=1.16",  # kaggle 2.x imports six without declaring it
+]
+
+[project.scripts]
+rrm = "risk_rule_mining.cli:main"
+rrm-server = "risk_rule_mining.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
