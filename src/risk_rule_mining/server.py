@@ -57,6 +57,43 @@ def describe_table(table: str) -> dict:
     }
 
 
+@mcp.tool()
+def profile_table(table: str) -> list[dict]:
+    """Column-by-column profile: role, description, nulls, distinct values, ranges, top values.
+
+    Reads saved metadata when `rrm profile` has been run, otherwise profiles on the fly.
+    """
+    from risk_rule_mining import profiling
+
+    with _connect() as con:
+        known = {r[0] for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+        if table not in known:
+            raise ValueError(f"Unknown table {table!r}. Known: {', '.join(sorted(known))}")
+        if "meta_columns" in known:
+            rows = con.execute(
+                "SELECT * FROM meta_columns WHERE tbl = ? ORDER BY rowid", [table]
+            ).fetchall()
+            if rows:
+                cols = [d[0] for d in con.description]
+                return [dict(zip(cols, r, strict=True)) for r in rows]
+        return profiling.profile_table(con, table)
+
+
+@mcp.tool()
+def get_metadata() -> dict:
+    """What each table is (description, grain, size, key) and how tables relate, with coverage."""
+    with _connect() as con:
+        known = {r[0] for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+        if "meta_tables" not in known:
+            raise FileNotFoundError("No metadata yet. Run `rrm profile credit` first.")
+        out = {}
+        for name in ("meta_tables", "meta_relationships"):
+            rows = con.execute(f"SELECT * FROM {name}").fetchall()
+            cols = [d[0] for d in con.description]
+            out[name.removeprefix("meta_")] = [dict(zip(cols, r, strict=True)) for r in rows]
+        return out
+
+
 def main() -> None:
     mcp.run()
 

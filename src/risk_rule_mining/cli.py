@@ -52,6 +52,23 @@ def cmd_demo(args: argparse.Namespace) -> None:
     print(f"Synthetic sample loaded into {config.db_path()}")
 
 
+def cmd_profile(args: argparse.Namespace) -> None:
+    """Build metadata tables in the database and write a data dictionary next to it."""
+    from risk_rule_mining import profiling
+
+    with db.connect() as con:
+        meta = profiling.build_metadata(con)
+    out = config.data_dir() / f"{args.domain}_data_dictionary.md"
+    out.write_text(profiling.data_dictionary_markdown(meta), encoding="utf-8")
+    print(f"{len(meta['tables'])} tables, {len(meta['columns'])} columns profiled")
+    for r in meta["relationships"]:
+        print(
+            f"  {r['child_table']}.{r['child_column']} -> {r['parent_table']} "
+            f"[{r['kind']}]: {r['row_match_pct']}% rows matched"
+        )
+    print(f"Data dictionary: {out}")
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     path = config.db_path()
     if not path.exists():
@@ -78,6 +95,10 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "load":
             p.add_argument("--raw", help="folder holding the raw CSVs")
         p.set_defaults(func=fn)
+
+    p = sub.add_parser("profile", help="build metadata tables and a data dictionary")
+    p.add_argument("domain", choices=sorted(DOMAINS))
+    p.set_defaults(func=cmd_profile)
 
     sub.add_parser("demo", help="load synthetic sample data (no download)").set_defaults(
         func=cmd_demo

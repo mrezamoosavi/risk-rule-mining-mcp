@@ -32,10 +32,31 @@ def test_load_creates_all_tables_with_rows(con, raw):
 
 def test_orphans_are_skipped_and_counted(con, raw):
     report = {r["table"]: r for r in credit.load(con, raw)}
+    # Hard keys (to application) skip orphans
     assert report["bureau"]["rows_skipped"] == 3
-    assert report["bureau_balance"]["rows_skipped"] == 3
     assert report["previous_application"]["rows_skipped"] == 3
     assert report["application"]["rows_skipped"] == 0
+    # Soft keys keep every row
+    assert report["bureau_balance"]["rows_skipped"] == 0
+
+
+def test_soft_key_coverage_counts_unmatched(con, raw):
+    credit.load(con, raw)
+    cov = {(r["table"], r["column"]): r for r in credit.soft_key_coverage(con)}
+    assert cov[("bureau_balance", "SK_ID_BUREAU")]["unmatched"] == 3
+    assert cov[("installments_payments", "SK_ID_PREV")]["unmatched"] == 0
+
+
+def test_description_file_in_windows_1252_loads(con, raw):
+    path = raw / credit.DESCRIPTION_FILE
+    path.write_bytes(
+        path.read_bytes().replace(b"payment difficulties", b"payment difficulties\x85")
+    )
+    credit.load(con, raw)
+    text = " ".join(
+        r[0] for r in con.execute("SELECT Description FROM column_description").fetchall()
+    )
+    assert "\u2026" in text
 
 
 def test_train_and_test_are_combined_with_split_flag(con, raw):

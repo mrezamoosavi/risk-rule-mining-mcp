@@ -36,3 +36,23 @@ def test_missing_database_message(tmp_path, monkeypatch):
     monkeypatch.setenv("RRM_DB", str(tmp_path / "absent.duckdb"))
     with pytest.raises(FileNotFoundError, match="rrm demo"):
         server.list_tables()
+
+
+def test_profile_table_on_the_fly(loaded_db):
+    prof = {c["column"]: c for c in server.profile_table("application")}
+    assert prof["SK_ID_CURR"]["role"] == "id"
+    assert prof["TARGET"]["role"] == "target"
+    assert prof["EXT_SOURCE_1"]["null_pct"] > 0
+
+
+def test_get_metadata_after_profile(loaded_db):
+    from risk_rule_mining import profiling
+
+    with db.connect(loaded_db) as con:
+        profiling.build_metadata(con)
+    meta = server.get_metadata()
+    assert {t["tbl"] for t in meta["tables"]} >= {"application", "bureau"}
+    kinds = {r["kind"] for r in meta["relationships"]}
+    assert kinds == {"hard", "soft"}
+    saved = server.profile_table("bureau")
+    assert any(c["col"] == "SK_ID_CURR" for c in saved)

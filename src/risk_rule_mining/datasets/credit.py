@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,10 +31,18 @@ QUICK_MODULUS = 20  # quick mode keeps roughly 1 applicant in 20
 
 @dataclass(frozen=True)
 class Table:
+    """One table. `foreign_keys` are enforced: child rows without a parent are skipped.
+
+    `soft_keys` are documented relationships that the source data does not fully honour
+    (Home Credit's monthly tables reference loans missing from previous_application).
+    They are not enforced, so no rows are lost; their coverage is measured and reported.
+    """
+
     name: str
     files: tuple[str, ...]
     primary_key: str | None = None
     foreign_keys: dict[str, tuple[str, str]] = field(default_factory=dict)
+    soft_keys: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 APP = ("application", "SK_ID_CURR")
@@ -46,27 +55,75 @@ TABLES: tuple[Table, ...] = (
     Table(
         "bureau_balance",
         ("bureau_balance.csv",),
-        None,
-        {"SK_ID_BUREAU": ("bureau", "SK_ID_BUREAU")},
+        soft_keys={"SK_ID_BUREAU": ("bureau", "SK_ID_BUREAU")},
     ),
     Table("previous_application", ("previous_application.csv",), "SK_ID_PREV", {"SK_ID_CURR": APP}),
     Table(
-        "pos_cash_balance", ("POS_CASH_balance.csv",), None, {"SK_ID_PREV": PREV, "SK_ID_CURR": APP}
+        "pos_cash_balance",
+        ("POS_CASH_balance.csv",),
+        foreign_keys={"SK_ID_CURR": APP},
+        soft_keys={"SK_ID_PREV": PREV},
     ),
     Table(
         "credit_card_balance",
         ("credit_card_balance.csv",),
-        None,
-        {"SK_ID_PREV": PREV, "SK_ID_CURR": APP},
+        foreign_keys={"SK_ID_CURR": APP},
+        soft_keys={"SK_ID_PREV": PREV},
     ),
     Table(
         "installments_payments",
         ("installments_payments.csv",),
-        None,
-        {"SK_ID_PREV": PREV, "SK_ID_CURR": APP},
+        foreign_keys={"SK_ID_CURR": APP},
+        soft_keys={"SK_ID_PREV": PREV},
     ),
 )
 DESCRIPTION_FILE = "HomeCredit_columns_description.csv"
+
+# Table descriptions and grain, from the competition's data description.
+TABLE_INFO: dict[str, dict[str, str]] = {
+    "application": {
+        "description": "Loan applications at Home Credit. Train rows carry TARGET "
+        "(1 = client had payment difficulties); test rows do not.",
+        "grain": "one row per applicant (SK_ID_CURR)",
+    },
+    "bureau": {
+        "description": "The applicant's previous credits at other institutions, "
+        "as reported to the Credit Bureau.",
+        "grain": "one row per bureau credit (SK_ID_BUREAU)",
+    },
+    "bureau_balance": {
+        "description": "Monthly status of each Credit Bureau credit.",
+        "grain": "one row per bureau credit per month",
+    },
+    "previous_application": {
+        "description": "The applicant's previous applications at Home Credit.",
+        "grain": "one row per previous application (SK_ID_PREV)",
+    },
+    "pos_cash_balance": {
+        "description": "Monthly snapshots of previous point-of-sale and cash loans at Home Credit.",
+        "grain": "one row per previous loan per month",
+    },
+    "credit_card_balance": {
+        "description": "Monthly snapshots of previous credit cards at Home Credit.",
+        "grain": "one row per previous card per month",
+    },
+    "installments_payments": {
+        "description": "Repayment history of previous Home Credit loans: what was due, "
+        "when, and what was paid.",
+        "grain": "one row per installment payment",
+    },
+}
+
+# How the Kaggle description file names each table.
+FILE_TO_TABLE: dict[str, str] = {
+    "application_{train|test}.csv": "application",
+    "bureau.csv": "bureau",
+    "bureau_balance.csv": "bureau_balance",
+    "previous_application.csv": "previous_application",
+    "POS_CASH_balance.csv": "pos_cash_balance",
+    "credit_card_balance.csv": "credit_card_balance",
+    "installments_payments.csv": "installments_payments",
+}
 EXPECTED_FILES = tuple(f for t in TABLES for f in t.files) + (DESCRIPTION_FILE,)
 
 
@@ -210,11 +267,45 @@ def load(con: duckdb.DuckDBPyConnection, raw: Path, quick: bool = False) -> list
         )
     con.execute("DROP TABLE IF EXISTS _stage")
 
-    con.execute(
-        "CREATE TABLE column_description AS SELECT * FROM "
-        + _csv(raw / DESCRIPTION_FILE, encoding="'latin-1'", all_varchar="true")
-    )
+    _load_descriptions(con, raw / DESCRIPTION_FILE)
     return report
+
+
+def _load_descriptions(con: duckdb.DuckDBPyConnection, path: Path) -> None:
+    """Kaggle's description file is Windows-1252 (it holds a 0x85 ellipsis), not UTF-8."""
+    text = path.read_bytes().decode("cp1252", errors="replace")
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", encoding="utf-8", delete=False) as f:
+        f.write(text)
+        utf8 = Path(f.name)
+    try:
+        con.execute(
+            "CREATE TABLE column_description AS SELECT * FROM " + _csv(utf8, all_varchar="true")
+        )
+    finally:
+        utf8.unlink(missing_ok=True)
+
+
+def soft_key_coverage(con: duckdb.DuckDBPyConnection) -> list[dict]:
+    """For each soft key: rows whose reference exists in the parent table, and rows that don't."""
+    out = []
+    for table in TABLES:
+        for col, (parent, pcol) in table.soft_keys.items():
+            total, matched = con.execute(
+                f"SELECT count(*), count(p.{quote(pcol)}) FROM {table.name} c "
+                f"LEFT JOIN (SELECT DISTINCT {quote(pcol)} FROM {parent}) p "
+                f"ON c.{quote(col)} = p.{quote(pcol)}"
+            ).fetchone()
+            out.append(
+                {
+                    "table": table.name,
+                    "column": col,
+                    "references": f"{parent}.{pcol}",
+                    "rows": total,
+                    "matched": matched,
+                    "unmatched": total - matched,
+                }
+            )
+    return out
 
 
 def status(con: duckdb.DuckDBPyConnection) -> list[dict]:
